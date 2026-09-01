@@ -1,0 +1,56 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Database-backed admin accounts (replaces a single hardcoded username/password from
+// .env). No public signup endpoint exists for this on purpose — accounts are created
+// via `npm run create-admin`, since an open admin-signup route would be a privilege
+// escalation hole.
+model Admin {
+  id           Int      @id @default(autoincrement())
+  username     String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+}
+
+// Only currently-active winners live here — one row per person, enforced by the unique
+// constraint on userId (the "one prize per person" rule at the database layer, not just
+// in application code). A KYC failure deletes the row here and writes a record to
+// WinnerHistory instead of flipping a status flag, which is what makes @@unique(userId)
+// possible without a Postgres partial/filtered index.
+model Winner {
+  id        Int      @id @default(autoincrement())
+  userId    String   @unique
+  tier      String // 'GRAND_PRIZE' | 'CONSISTENCY_1' | 'CONSISTENCY_2' | 'TOP_PERFORMER' | 'CATEGORY_1' | 'CATEGORY_2'
+  category  String? // set for CATEGORY_1 / CATEGORY_2 only
+  kycStatus String   @default("PENDING") // 'PENDING' | 'PASSED'
+  score     Float
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tier])
+  @@index([category])
+  @@index([kycStatus])
+}
+
+// Append-only audit trail of every KYC failure: who failed, which slot they occupied,
+// and who (if anyone) replaced them. Lets an admin see a chained cascade end to end
+// (A fails -> B promoted -> B fails -> C promoted) even though only the latest holder
+// of a slot appears in the Winner table.
+model WinnerHistory {
+  id               Int      @id @default(autoincrement())
+  userId           String
+  tier             String
+  category         String?
+  score            Float
+  outcome          String // 'KYC_FAILED' (kept generic so future outcomes don't need a schema change)
+  replacedByUserId String?
+  decidedAt        DateTime @default(now())
+
+  @@index([tier])
+  @@index([userId])
+}

@@ -295,7 +295,13 @@ npx prisma generate
 ```
 
 Admin accounts live in the database (bcrypt-hashed passwords) — there's no public
-signup form for admins on purpose, so create the first one from the command line:
+signup form for admins on purpose.
+
+**Note:** A default admin account is automatically created when you start the server:
+- **Username:** `admin`
+- **Password:** `Admin@123`
+
+You can also create additional admins from the command line:
 
 ```
 npm run create-admin -- <username> <password>

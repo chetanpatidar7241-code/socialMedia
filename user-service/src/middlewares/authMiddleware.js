@@ -1,17 +1,15 @@
-const jwt = require('jsonwebtoken');
 const { StatusCodes } = require('http-status-codes');
+const { createAuthMiddleware } = require('@internal/shared-auth');
+const config = require('../config/env');
 const { sendResponse } = require('../services/CommonService');
 const { ResponseMessage } = require('../utils/ResponseMessage');
 
-exports.authenticate = (req, res, next) => {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return sendResponse(res, StatusCodes.UNAUTHORIZED, ResponseMessage.NO_TOKEN_PROVIDED);
-
-    try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        req.user = decoded;
-        next();
-    } catch (error) {
-        sendResponse(res, StatusCodes.UNAUTHORIZED, ResponseMessage.INVALID_TOKEN);
-    }
-};
+// Token-verification mechanics (extract Bearer token, jwt.verify, attach to req) live
+// in the shared module; this service's own secret and response contract stay here —
+// a user token is verified against JWT_SECRET only, never ADMIN_JWT_SECRET.
+exports.authenticate = createAuthMiddleware({
+    secret: config.jwtSecret,
+    attachAs: 'user',
+    onMissingToken: (req, res) => sendResponse(res, StatusCodes.UNAUTHORIZED, ResponseMessage.NO_TOKEN_PROVIDED),
+    onInvalidToken: (req, res) => sendResponse(res, StatusCodes.UNAUTHORIZED, ResponseMessage.INVALID_TOKEN)
+});

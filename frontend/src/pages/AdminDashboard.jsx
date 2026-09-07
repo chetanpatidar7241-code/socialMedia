@@ -5,6 +5,26 @@ import { useToast } from '../context/ToastContext';
 import { WINNER_TIERS } from '../constants';
 import { Eye, EyeOff } from 'lucide-react';
 
+// Ranking generation and the KYC-FAILED cascade now run on a background worker
+// (BullMQ/Redis) instead of inline in the request — the POST just returns a jobId,
+// and this polls GET /api/ranking/jobs/:jobId until it completes or fails. Errors
+// thrown from here are plain Error objects (no `.response`), unlike axios errors.
+async function pollJob(jobId, { intervalMs = 1500, timeoutMs = 120000 } = {}) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const res = await adminApi.get(`/ranking/jobs/${jobId}`);
+    const { status, result, error } = res.data;
+    if (status === 'completed') return result;
+    if (status === 'failed') throw new Error(error || 'The job failed');
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error('Timed out waiting for the job to finish');
+}
+
+function jobErrorMessage(err, fallback) {
+  return err.response ? getErrorMessage(err, fallback) : (err.message || fallback);
+}
+
 export default function AdminDashboard() {
   const { isAdmin, adminLogin } = useAuth();
   const [username, setUsername] = useState('');
@@ -70,7 +90,11 @@ export default function AdminDashboard() {
 
     setGenerating(true);
     try {
-      await adminApi.post('/ranking/generate', { force });
+      // The pre-enqueue 409 guard (winners already exist, force not set) still
+      // returns synchronously — only the actual generation work is now queued.
+      const res = await adminApi.post('/ranking/generate', { force });
+      toast.info(res.data.message || 'Ranking generation queued…');
+      await pollJob(res.data.jobId);
       toast.success('Rankings generated successfully!');
       fetchWinners(tierFilter);
     } catch (err) {
@@ -80,7 +104,7 @@ export default function AdminDashboard() {
         }
         return;
       }
-      toast.error(getErrorMessage(err, 'Error generating rankings'));
+      toast.error(jobErrorMessage(err, 'Error generating rankings'));
     } finally {
       setGenerating(false);
     }
@@ -90,10 +114,26 @@ export default function AdminDashboard() {
     setKycPendingId(id);
     try {
       const res = await adminApi.post(`/winners/${id}/kyc`, { status });
-      toast.success(res.data.message);
+
+      if (status === 'PASSED') {
+        // Trivial single-row update — still synchronous, still an immediate result.
+        toast.success(res.data.message);
+        fetchWinners(tierFilter);
+        return;
+      }
+
+      // FAILED: the cascade now runs on the worker — poll for the { removed, promoted }
+      // result and build the same message the backend used to return synchronously.
+      toast.info(res.data.message || 'KYC failure cascade queued…');
+      const { removed, promoted } = await pollJob(res.data.jobId);
+      toast.success(
+        promoted
+          ? `KYC marked as FAILED. ${removed.tier}${removed.category ? ` (${removed.category})` : ''} slot cascaded to the next eligible person.`
+          : 'KYC marked as FAILED. No eligible replacement remains; the slot is unawarded.'
+      );
       fetchWinners(tierFilter);
     } catch (err) {
-      toast.error(getErrorMessage(err, 'Error updating KYC'));
+      toast.error(jobErrorMessage(err, 'Error updating KYC'));
     } finally {
       setKycPendingId(null);
     }

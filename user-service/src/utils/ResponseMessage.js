@@ -36,11 +36,10 @@ const ResponseMessage = {
     NO_TOKEN_PROVIDED: 'No token provided',
     INVALID_TOKEN: 'Invalid token',
 
-    // Internal API
-    INTERNAL_API_NOT_CONFIGURED: 'Internal API is not configured',
+    // Internal API (NATS request/reply, consumed only by the Admin Service)
     UNAUTHORIZED: 'Unauthorized',
     RANKINGS_FETCHED: 'Ranking data fetched successfully',
-    USER_IDS_REQUIRED: 'ids query parameter is required (comma-separated user ids)',
+    USER_IDS_REQUIRED: 'ids field is required (a non-empty array of user ids)',
     USERS_FETCHED: 'Users fetched successfully',
 
     // Uploads

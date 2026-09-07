@@ -2,16 +2,10 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const { StatusCodes } = require("http-status-codes");
-require("dotenv").config();
+const config = require("./src/config/env");
 const connectDB = require("./src/config/db");
+const { startInternalSubscriptions } = require("./src/messaging/internalSubscriber");
 const { sendResponse } = require("./src/services/CommonService");
-
-["JWT_SECRET", "INTERNAL_API_KEY"].forEach((key) => {
-  if (!process.env[key]) {
-    console.error(`Missing required environment variable: ${key}`);
-    process.exit(1);
-  }
-});
 
 const app = express();
 
@@ -20,6 +14,20 @@ app.use(express.json());
 app.use("/uploads", express.static("uploads"));
 
 connectDB();
+
+// The public auth/post routes below don't depend on NATS at all, so a broker that
+// isn't reachable yet must never block server startup — retry in the background
+// instead of awaiting this or exiting the process on failure.
+function startInternalSubscriptionsWithRetry(retryDelayMs = 5000) {
+  startInternalSubscriptions().catch((err) => {
+    console.error(
+      `[nats] failed to start internal subscriptions, retrying in ${retryDelayMs}ms:`,
+      err.message
+    );
+    setTimeout(() => startInternalSubscriptionsWithRetry(retryDelayMs), retryDelayMs);
+  });
+}
+startInternalSubscriptionsWithRetry();
 
 const routes = require("./src/routes");
 const { ResponseMessage } = require("./src/utils/ResponseMessage");
@@ -49,7 +57,7 @@ app.use((err, req, res, next) => {
   next();
 });
 
-const PORT = process.env.PORT || 4000;
+const PORT = config.port;
 app.listen(PORT, () => {
   console.log(`User service running on port ${PORT}`);
 });

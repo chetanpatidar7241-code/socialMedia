@@ -4,6 +4,8 @@ const { allocatePrizes } = require('../ranking/allocatePrizes');
 const { findReplacement } = require('../ranking/findReplacement');
 const { AppError } = require('../utils/AppError');
 const { Prisma } = require('@prisma/client');
+const winnerRepository = require('../repositories/winnerRepository');
+const winnerHistoryRepository = require('../repositories/winnerHistoryRepository');
 
 const MAX_CASCADE_RETRIES = 5;
 
@@ -12,30 +14,41 @@ const MAX_CASCADE_RETRIES = 5;
 // someone asks for it. Once winners exist, cascades (KYC failures) are the only way
 // slots change; a caller must explicitly pass force:true to wipe everything and start
 // over, which is why this guards on existing rows instead of always recomputing.
-async function generateInitialRankings({ force = false } = {}) {
-    const existingCount = await prisma.winner.count();
+// Extracted so the controller can run this same check synchronously BEFORE
+// enqueueing a ranking job (fast-fail 409 instead of "202, then poll to discover a
+// 409") — generateInitialRankings still runs it again itself below, since a job can
+// sit in the queue for a moment and the guard must hold at execution time, not just
+// at enqueue time.
+async function assertRankingsNotYetGenerated({ force = false } = {}) {
+    const existingCount = await winnerRepository.count();
     if (existingCount > 0 && !force) {
         throw new AppError(409, 'Rankings have already been generated. Pass force=true to fully regenerate (this discards all current winners and history).');
     }
+}
+
+async function generateInitialRankings({ force = false } = {}) {
+    await assertRankingsNotYetGenerated({ force });
 
     const { posts, consistency } = await fetchRankingData();
 
     return prisma.$transaction(async (tx) => {
         if (force) {
-            await tx.winner.deleteMany({});
-            await tx.winnerHistory.deleteMany({});
+            await winnerRepository.deleteMany(tx);
+            await winnerHistoryRepository.deleteMany(tx);
         }
 
-        const disqualifiedUserIds = new Set((await tx.winnerHistory.findMany({ select: { userId: true } })).map((h) => h.userId));
+        const historyUserIds = await winnerHistoryRepository.findAllUserIds(tx);
+        const disqualifiedUserIds = new Set(historyUserIds.map((h) => h.userId));
         const winners = allocatePrizes(posts, consistency, disqualifiedUserIds);
 
         if (winners.length > 0) {
-            await tx.winner.createMany({
-                data: winners.map((w) => ({ userId: w.userId, tier: w.tier, category: w.category, score: w.score, kycStatus: 'PENDING' }))
-            });
+            await winnerRepository.createMany(
+                winners.map((w) => ({ userId: w.userId, tier: w.tier, category: w.category, score: w.score, kycStatus: 'PENDING' })),
+                tx
+            );
         }
 
-        return tx.winner.findMany({ orderBy: [{ tier: 'asc' }, { category: 'asc' }] });
+        return winnerRepository.findMany({ orderBy: [{ tier: 'asc' }, { category: 'asc' }] }, tx);
     });
 }
 
@@ -53,7 +66,7 @@ async function withUsernames(winners) {
 }
 
 async function listWinners({ tier, category } = {}) {
-    const winners = await prisma.winner.findMany({
+    const winners = await winnerRepository.findMany({
         where: {
             ...(tier ? { tier } : {}),
             ...(category ? { category } : {})
@@ -64,12 +77,12 @@ async function listWinners({ tier, category } = {}) {
 }
 
 async function listHistory() {
-    return prisma.winnerHistory.findMany({ orderBy: { decidedAt: 'desc' } });
+    return winnerHistoryRepository.findMany({ orderBy: { decidedAt: 'desc' } });
 }
 
 async function markKycPassed(winnerId) {
     try {
-        return await prisma.winner.update({ where: { id: winnerId }, data: { kycStatus: 'PASSED' } });
+        return await winnerRepository.updateKycStatus(winnerId, 'PASSED');
     } catch (err) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
             throw new AppError(404, 'Winner not found');
@@ -89,14 +102,14 @@ async function markKycFailedWithCascade(winnerId) {
     for (let attempt = 0; attempt < MAX_CASCADE_RETRIES; attempt++) {
         try {
             return await prisma.$transaction(async (tx) => {
-                const winner = await tx.winner.findUnique({ where: { id: winnerId } });
+                const winner = await winnerRepository.findById(winnerId, tx);
                 if (!winner) throw new AppError(404, 'Winner not found');
 
-                await tx.winner.delete({ where: { id: winnerId } });
+                await winnerRepository.deleteById(winnerId, tx);
 
                 const [activeWinners, history] = await Promise.all([
-                    tx.winner.findMany({ select: { userId: true } }),
-                    tx.winnerHistory.findMany({ select: { userId: true } })
+                    winnerRepository.findAllUserIds(tx),
+                    winnerHistoryRepository.findAllUserIds(tx)
                 ]);
                 const excludeUserIds = new Set([
                     ...activeWinners.map((w) => w.userId),
@@ -112,16 +125,14 @@ async function markKycFailedWithCascade(winnerId) {
                     excludeUserIds
                 });
 
-                await tx.winnerHistory.create({
-                    data: {
-                        userId: winner.userId,
-                        tier: winner.tier,
-                        category: winner.category,
-                        score: winner.score,
-                        outcome: 'KYC_FAILED',
-                        replacedByUserId: replacement?.userId ?? null
-                    }
-                });
+                await winnerHistoryRepository.create({
+                    userId: winner.userId,
+                    tier: winner.tier,
+                    category: winner.category,
+                    score: winner.score,
+                    outcome: 'KYC_FAILED',
+                    replacedByUserId: replacement?.userId ?? null
+                }, tx);
 
                 let newWinner = null;
                 if (replacement) {
@@ -129,9 +140,13 @@ async function markKycFailedWithCascade(winnerId) {
                     // concurrent cascade elsewhere already claimed this same person for a
                     // different slot, this insert throws P2002 and we retry from scratch
                     // below instead of ever letting one person hold two prizes.
-                    newWinner = await tx.winner.create({
-                        data: { userId: replacement.userId, tier: winner.tier, category: winner.category, score: replacement.score, kycStatus: 'PENDING' }
-                    });
+                    newWinner = await winnerRepository.create({
+                        userId: replacement.userId,
+                        tier: winner.tier,
+                        category: winner.category,
+                        score: replacement.score,
+                        kycStatus: 'PENDING'
+                    }, tx);
                 }
 
                 return { removed: winner, promoted: newWinner };
@@ -146,4 +161,11 @@ async function markKycFailedWithCascade(winnerId) {
     throw new AppError(409, 'Could not resolve KYC cascade due to concurrent updates; please retry');
 }
 
-module.exports = { generateInitialRankings, listWinners, listHistory, markKycPassed, markKycFailedWithCascade };
+module.exports = {
+    generateInitialRankings,
+    assertRankingsNotYetGenerated,
+    listWinners,
+    listHistory,
+    markKycPassed,
+    markKycFailedWithCascade
+};

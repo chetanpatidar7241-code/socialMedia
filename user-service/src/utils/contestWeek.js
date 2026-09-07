@@ -1,9 +1,11 @@
+const config = require('../config/env');
+
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 // Contest week is derived server-side from a fixed contest start date rather than
 // trusted from client input, so a post's week can't be spoofed to game the
 // consistency ranking. Falls back to "now" if unset, so a fresh deployment starts week 1.
-const CONTEST_START_DATE = new Date(process.env.CONTEST_START_DATE || Date.now());
+const CONTEST_START_DATE = new Date(config.contestStartDate || Date.now());
 
 function getContestWeek(date = new Date()) {
     const diff = date.getTime() - CONTEST_START_DATE.getTime();

@@ -1,0 +1,17 @@
+{
+  "name": "@internal/shared-auth",
+  "version": "1.0.0",
+  "description": "Shared JWT verification middleware factories used by user-service and admin-service. Not published to any registry — referenced as a workspace-local file: dependency from within this monorepo, so both services always get the exact same on-disk copy.",
+  "main": "index.js",
+  "private": true,
+  "license": "ISC",
+  "scripts": {
+    "test": "jest"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.3"
+  },
+  "devDependencies": {
+    "jest": "^30.5.1"
+  }
+}

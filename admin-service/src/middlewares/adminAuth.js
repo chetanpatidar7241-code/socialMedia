@@ -1,12 +1,12 @@
-const jwt = require('jsonwebtoken');
+const { createAuthMiddleware } = require('@internal/shared-auth');
+const config = require('../config/env');
 
-module.exports = function adminAuth(req, res, next) {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ message: 'Unauthorized' });
-    try {
-        req.admin = jwt.verify(token, process.env.ADMIN_JWT_SECRET);
-        next();
-    } catch (err) {
-        res.status(401).json({ message: 'Invalid or expired token' });
-    }
-};
+// Token-verification mechanics live in the shared module; this service's own secret
+// and response contract stay here — an admin token is verified against
+// ADMIN_JWT_SECRET only, never JWT_SECRET, so a user token can never pass here.
+module.exports = createAuthMiddleware({
+    secret: config.adminJwtSecret,
+    attachAs: 'admin',
+    onMissingToken: (req, res) => res.status(401).json({ message: 'Unauthorized' }),
+    onInvalidToken: (req, res) => res.status(401).json({ message: 'Invalid or expired token' })
+});

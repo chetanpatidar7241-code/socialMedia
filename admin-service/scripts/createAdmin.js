@@ -1,8 +1,9 @@
 // One-off CLI to create an admin account. Deliberately not an HTTP endpoint — an
 // open "create admin" route would let anyone hand themselves admin access.
 // Usage: node scripts/createAdmin.js <username> <password>
-require('dotenv').config();
 const bcrypt = require('bcryptjs');
+// prismaClient requires src/config/env.js, which loads and validates .env — no need
+// to call dotenv.config() again here.
 const prisma = require('../src/prismaClient');
 
 async function main() {

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { userApi, getErrorMessage } from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
+import { validateResidency } from '../utils/validation';
 import { RESIDENCY_OPTIONS, ELIGIBLE_RESIDENCY } from '../constants';
 
 export default function Profile() {
@@ -13,8 +14,9 @@ export default function Profile() {
 
   const handleUpdate = async (e) => {
     e.preventDefault();
-    if (!residency || residency.trim() === '') {
-      setError('Residency is required');
+    const validationError = validateResidency(residency);
+    if (validationError) {
+      setError(validationError);
       return;
     }
     setError('');

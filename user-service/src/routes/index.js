@@ -3,30 +3,36 @@ const router = express.Router();
 
 const authController = require('../controllers/authController');
 const postController = require('../controllers/postController');
-const internalController = require('../controllers/internalController');
 
 const { authenticate } = require('../middlewares/authMiddleware');
 const optionalAuthenticate = require('../middlewares/optionalAuthMiddleware');
-const internalAuth = require('../middlewares/internalAuthMiddleware');
 const { rateLimit } = require('../middlewares/rateLimiter');
 const upload = require('../middlewares/uploadMiddleware');
+const { validate } = require('../middlewares/validate');
+const { signupSchema, loginSchema, updateResidencySchema } = require('../validators/authSchemas');
+const { postIdParamsSchema, createPostSchema, interactBodySchema, requireMedia } = require('../validators/postSchemas');
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20 });
 
 // Auth routes
-router.post('/auth/signup', authLimiter, authController.signup);
-router.post('/auth/login', authLimiter, authController.login);
-router.put('/auth/residency', authenticate, authController.updateResidency);
+router.post('/auth/signup', authLimiter, validate(signupSchema), authController.signup);
+router.post('/auth/login', authLimiter, validate(loginSchema), authController.login);
+router.put('/auth/residency', authenticate, validate(updateResidencySchema), authController.updateResidency);
 
 // Post routes
-router.post('/posts', authenticate, upload.single('media'), postController.createPost);
+router.post('/posts', authenticate, upload.single('media'), requireMedia, validate(createPostSchema), postController.createPost);
 router.get('/posts', optionalAuthenticate, postController.getPosts);
-router.get('/posts/:postId/comments', postController.getComments);
-router.post('/posts/:postId/interact', authenticate, postController.interact);
+router.get('/posts/:postId/comments', validate(postIdParamsSchema, 'params'), postController.getComments);
+router.post(
+    '/posts/:postId/interact',
+    authenticate,
+    validate(postIdParamsSchema, 'params'),
+    validate(interactBodySchema),
+    postController.interact
+);
 
-// Internal routes: consumed only by the Admin Service, guarded by a shared secret
-// since architecture rules forbid the Admin Service from touching this DB directly.
-router.get('/internal/rankings', internalAuth, internalController.getRankingsData);
-router.get('/internal/users', internalAuth, internalController.getUsersByIds);
+// The old HTTP internal routes (/internal/rankings, /internal/users) are retired —
+// the Admin Service now reaches this data via NATS request/reply
+// (see src/messaging/internalSubscriber.js), not an HTTP call.
 
 module.exports = router;

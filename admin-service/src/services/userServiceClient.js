@@ -1,19 +1,44 @@
-const axios = require('axios');
+const { getConnection, codec, NATS_TIMEOUT_MS } = require('../messaging/natsClient');
+const config = require('../config/env');
 
-const USER_SERVICE_URL = process.env.USER_SERVICE_URL || 'http://localhost:4000/api/internal';
-const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY;
+// Same subjects the User Service subscribes to (src/messaging/internalSubscriber.js
+// over there) — the NATS equivalent of the old GET /api/internal/rankings and
+// GET /api/internal/users routes.
+const SUBJECTS = {
+    RANKINGS: 'internal.rankings.get',
+    USERS: 'internal.users.get'
+};
 
-// Every field the ranking engine needs (post scores, categories, consistency) crosses
-// the service boundary through this one HTTP call — the Admin Service never touches
+// Every field the ranking engine needs (post scores, categories, consistency) still
+// crosses the service boundary through one call — the Admin Service never touches
 // the User Service's MongoDB, satisfying the "no shared DB access" architecture rule.
+// Only the transport changed (HTTP -> NATS request/reply); this stays a synchronous,
+// latency-sensitive round trip, not a fire-and-forget event.
+async function request(subject, payload) {
+    const nc = await getConnection();
+
+    let msg;
+    try {
+        msg = await nc.request(subject, codec.encode(payload), { timeout: NATS_TIMEOUT_MS });
+    } catch (err) {
+        // nats.js throws on no reply within NATS_TIMEOUT_MS (subject code 'TIMEOUT')
+        // or when the broker/subscriber is unreachable — both surface as a plain
+        // Error with no .statusCode, same as an unreachable/timed-out axios call used
+        // to: it falls through to sendError's generic 500 branch, matching prior behavior.
+        throw new Error(`User Service did not respond on "${subject}": ${err.message}`);
+    }
+
+    const reply = codec.decode(msg.data);
+    if (!reply.ok) {
+        const error = new Error(reply.message || 'User Service request failed');
+        error.statusCode = reply.statusCode;
+        throw error;
+    }
+    return reply.data;
+}
+
 async function fetchRankingData() {
-    const { data: envelope } = await axios.get(`${USER_SERVICE_URL}/rankings`, {
-        headers: { 'x-internal-api-key': INTERNAL_API_KEY },
-        timeout: 10_000
-    });
-    // User Service responses are wrapped as { message, data } — unwrap once here so
-    // the rest of the Admin Service only ever deals with the actual payload shape.
-    const data = envelope?.data ?? envelope;
+    const data = await request(SUBJECTS.RANKINGS, { apiKey: config.internalApiKey });
     if (!Array.isArray(data.posts) || !Array.isArray(data.consistency)) {
         const err = new Error('User Service returned an unexpected ranking data shape');
         err.statusCode = 502;
@@ -28,12 +53,7 @@ async function fetchUsernames(userIds) {
     const uniqueIds = [...new Set(userIds)];
     if (uniqueIds.length === 0) return {};
 
-    const { data: envelope } = await axios.get(`${USER_SERVICE_URL}/users`, {
-        headers: { 'x-internal-api-key': INTERNAL_API_KEY },
-        params: { ids: uniqueIds.join(',') },
-        timeout: 10_000
-    });
-    return envelope?.data ?? envelope;
+    return request(SUBJECTS.USERS, { apiKey: config.internalApiKey, ids: uniqueIds });
 }
 
 module.exports = { fetchRankingData, fetchUsernames };
